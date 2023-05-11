@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sts-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sts-scheduler-as-system-kube-scheduler
+subjects:
+- kind: ServiceAccount
+  name: sts-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: system:kube-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sts-scheduler-as-system-volume-scheduler
+subjects:
+- kind: ServiceAccount
+  name: sts-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: system:volume-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sts-scheduler-extra
+subjects:
+- kind: ServiceAccount
+  name: sts-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: sts-scheduler-extra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sts-scheduler-extra
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get",  "list",  "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resourceNames: ["sts-scheduler"]
+    resources: ["leases"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resourceNames: ["sts-scheduler"]
+    resources: ["endpoints"]
+    verbs: ["delete",  "get",  "patch",  "update"]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sts-scheduler-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      leaseDuration: 15s
+      renewDeadline: 10s
+      resourceLock: leases
+      resourceName: sts-scheduler
+      resourceNamespace: kube-system
+    profiles:
+      - plugins:
+          preFilter:
+            enabled:
+              - name: StatefulSetScheduler
+          filter:
+            enabled:
+              - name: StatefulSetScheduler
+        schedulerName: sts-scheduler
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sts-scheduler
+  namespace: kube-system
+  labels:
+    app: sts-scheduler
+    component: scheduler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sts-scheduler
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        app: sts-scheduler
+        component: scheduler
+    spec:
+      serviceAccount: sts-scheduler
+      containers:
+        - name: sts-scheduler
+          image: ghcr.io/grffio/k8s-sts-scheduler:latest
+          imagePullPolicy: Always
+          args:
+            - --config=/configs/config.yaml
+          env:
+            - name: STS-SCHEDULER_LABELS_POD
+              value: "example.io/kind"
+            - name: STS-SCHEDULER_LABELS_NODE
+              value: "example.io/node"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "400m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+          volumeMounts:
+            - name: sts-scheduler-config
+              mountPath: /configs
+          securityContext:
+            privileged: false
+      hostNetwork: false
+      hostPID: false
+      volumes:
+        - name: sts-scheduler-config
+          configMap:
+            name: sts-scheduler-config

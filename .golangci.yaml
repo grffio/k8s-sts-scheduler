@@ -1,0 +1,126 @@
+run:
+  deadline: 5m
+  skip-dirs-use-default: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
+  govet:
+    check-shadowing: true
+    fieldalignment: true
+  golint:
+    min-confidence: 0.8
+  gofmt:
+    simplify: true
+  gofumpt:
+    module-path: github.com/grffio/k8s-sts-scheduler
+  goimports:
+    local-prefixes: github.com/grffio/k8s-sts-scheduler
+  goconst:
+    min-len: 2
+    min-occurrences: 2
+  fieldalignment:
+    suggest-new: true
+  misspell:
+    locale: US
+    ignore-words:
+      - cancelled
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: if-return
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unreachable-code
+  unused:
+    check-exported: false
+  unparam:
+    algo: cha
+    check-exported: false
+
+linters:
+    disable-all: true
+    enable:
+  #    - cyclop
+      - depguard
+      - dogsled
+  #    - dupl
+      - errcheck
+      - errorlint
+  #    - exhaustive
+  #    - exhaustivestruct
+  #    - forbidigo
+  #    - funlen
+  #    - gci
+  #    - gocognit
+      - goconst
+      - gocritic
+      - gocyclo
+  #    - godot
+      - godox
+      - gofmt # On why gofmt when goimports is enabled - https://github.com/golang/go/issues/21476
+      - gofumpt
+      - goheader
+      - goimports
+  #    - gomnd
+  #    - gomoddirectives
+  #    - gomodguard
+      - gosec
+      - gosimple
+      - govet
+      - depguard
+  #    - ifshort
+  #    - ireturn
+      - lll
+      - makezero
+      - misspell
+      - ineffassign
+      - misspell
+      - nakedret
+      - nestif
+  #    - nilnil
+  #    - nlreturn
+      - nolintlint
+      - prealloc
+      - predeclared
+      - rowserrcheck
+      - revive
+      - staticcheck
+      - stylecheck
+  #    - tagliatelle
+  #    - testpackage
+  #    - thelper
+  #    - tenv
+      - typecheck
+      - unconvert
+      - unparam
+      - unused
+  #    - varnamelen
+      - whitespace
+  #    - wrapcheck
+  #    - wsl
+
+issues:
+  exclude:
+    - "has been deprecated since Go 1.16"
+  exclude-use-default: true
+  max-per-linter: 0
+  max-same-issues: 0
+  new: false

@@ -1,0 +1,72 @@
+version: '3'
+
+env:
+  CGO_ENABLED: '0'
+
+vars:
+  BIN_DIR: "{{.ROOT_DIR}}/bin"
+  INSTALL_DIR: "{{.GOPATH}}/bin"
+  GOPATH:
+    sh: go env GOPATH
+  VERSION:
+    sh: git log -n 1 --format=%h
+
+tasks:
+  default:
+    cmds:
+      - task: lint
+      - task: test
+
+  lint:
+    desc: Runs golangci-lint
+    cmds:
+      - golangci-lint -v run ./...
+    sources:
+      - './**/*.go'
+      - .golangci.yml
+
+  test:
+    desc: Runs test suite
+    cmds:
+      - go test ./...
+    sources:
+      - './**/*.go'
+
+  deps:get:
+    desc: Download the dependencies.
+    cmds:
+      -  go mod download
+    sources:
+      - 'go.mod'
+      - 'go.sum'
+
+  build:
+    desc: Build Task
+    deps: [deps:get]
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -ldflags="-w -s -X main.version=${VERSION}" -o {{.BIN_DIR}} ./...
+    env:
+      VERSION: "{{.VERSION}}"
+    sources:
+      - './**/*.go'
+    generates:
+      - "{{.BIN_DIR}}/scheduler"
+
+  install:
+    desc: Installs Task
+    deps: [deps:get]
+    cmds:
+      - go install -ldflags="-w -s -X main.version=${VERSION}" ./...
+    env:
+      VERSION: "{{.VERSION}}"
+    sources:
+      - './**/*.go'
+    generates:
+      - "{{.INSTALL_DIR}}/scheduler"
+
+  clean:
+    desc: Cleans
+    cmds:
+      - rm -rf {{.BIN_DIR}}
+      - rm -rf {{.INSTALL_DIR}}/scheduler
