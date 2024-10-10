@@ -22,7 +22,7 @@ This plugin is especially useful when you want to ensure that each Pod of a Stat
 
 ### Installation
 
-To deploy the StatefulSetScheduler in your Kubernetes cluster, you can use the provided Kubernetes configuration file `sts-scheduler.yaml` located in the `examples` directory.
+To deploy the StatefulSetScheduler in your Kubernetes cluster, you can use the provided Kubernetes configuration file `sts-scheduler.yaml` located in the [examples](examples) directory.
 
 This scheduler plugin is configured through environment variables. Here are the key variables to set:
 
@@ -65,18 +65,14 @@ spec:
   template:
     metadata:
       labels:
-        example.io/kind: sts-service
-  template:
-    metadata:
-      labels:
         name: my-statefulset
-        example.io/kind: service-kind
+        example.io/kind: my-app-cluster
     spec:
       schedulerName: sts-scheduler
   ...
 ```
 
-Example `sts-application.yaml` located in the `examples` directory.
+Example `sts-application.yaml` located in the [examples](examples) directory.
 
 ## License
 
