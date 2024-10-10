@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/kelseyhightower/envconfig"
@@ -26,8 +27,12 @@ func main() {
 
 	// Register custom plugins to the scheduler framework.
 	command := app.NewSchedulerCommand(
-		app.WithPlugin(statefulset.Name, func(_ runtime.Object, h framework.Handle) (framework.Plugin, error) {
-			return statefulset.NewSTSScheduler(h, cnf.Labels)
+		app.WithPlugin(statefulset.Name, func(
+			_ context.Context,
+			_ runtime.Object,
+			_ framework.Handle,
+		) (framework.Plugin, error) {
+			return statefulset.NewScheduler(cnf.Labels)
 		}),
 	)
 

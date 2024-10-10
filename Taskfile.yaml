@@ -23,6 +23,7 @@ tasks:
       - golangci-lint -v run ./...
     sources:
       - './**/*.go'
+      - './go.mod'
       - .golangci.yml
 
   test:
@@ -45,7 +46,7 @@ tasks:
     deps: [deps:get]
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -ldflags="-w -s -X main.version=${VERSION}" -o {{.BIN_DIR}} ./...
+      - go build -ldflags="-w -s" -o {{.BIN_DIR}} ./...
     env:
       VERSION: "{{.VERSION}}"
     sources:
@@ -57,7 +58,7 @@ tasks:
     desc: Installs Task
     deps: [deps:get]
     cmds:
-      - go install -ldflags="-w -s -X main.version=${VERSION}" ./...
+      - go install -ldflags="-w -s" ./...
     env:
       VERSION: "{{.VERSION}}"
     sources:
