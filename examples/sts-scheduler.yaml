@@ -83,6 +83,9 @@ data:
       resourceNamespace: kube-system
     profiles:
       - plugins:
+          preEnqueue:
+            enabled:
+              - name: StatefulSetScheduler
           preFilter:
             enabled:
               - name: StatefulSetScheduler
