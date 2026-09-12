@@ -1,23 +1,51 @@
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+spec:
+  clusterIP: None
+  selector:
+    app: app
+  ports:
+    - name: app
+      port: 80
+      targetPort: 80
+
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: app
 spec:
+  serviceName: app
+  replicas: 3
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: app
-  serviceName: "app"
-  replicas: 3
   template:
     metadata:
       labels:
         app: app
-        example.io/kind: "custom-scheduler"
     spec:
       schedulerName: sts-scheduler
-      terminationGracePeriodSeconds: 3
+      # Nodes selected for this workload must have:
+      # - scheduling.example.com/ordinal=0 on one node
+      # - scheduling.example.com/ordinal=1 on one node
+      # - scheduling.example.com/ordinal=2 on one node
+      terminationGracePeriodSeconds: 1
       containers:
-      - name: app
-        image: busybox:1.36
-        command: ["sleep", "infinity"]
+        - name: app
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sleep
+            - infinity
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 40m
+              memory: 64Mi

@@ -1,0 +1,35 @@
+version: '3.49'
+
+vars:
+  DEFAULT_IMAGE_TAG:
+    sh: |
+      if tag="$(git describe --tags --exact-match 2>/dev/null)"; then
+        printf '%s\n' "$tag"
+        exit
+      fi
+      if branch="$(git branch --show-current 2>/dev/null)" && test -n "$branch"; then
+        printf '%s\n' "$branch" |
+          tr '[:upper:]' '[:lower:]' |
+          sed -E 's|[^a-z0-9_.-]+|-|g; s|^[.-]+||; s|[.-]+$||'
+        exit
+      fi
+      git rev-parse --short=12 HEAD 2>/dev/null || printf 'latest\n'
+
+  IMAGE: '{{.DOCKER_REGISTRY}}/{{.APP_NAME}}:{{.IMAGE_TAG | default .DEFAULT_IMAGE_TAG}}'
+
+tasks:
+  build:
+    desc: Build Docker image
+    cmds:
+      - docker build --tag "{{.IMAGE}}" .
+
+  push:
+    desc: Push Docker image
+    cmds:
+      - docker push "{{.IMAGE}}"
+
+  publish:
+    desc: Build and push Docker image
+    cmds:
+      - task: build
+      - task: push

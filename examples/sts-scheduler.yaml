@@ -4,95 +4,101 @@ kind: ServiceAccount
 metadata:
   name: sts-scheduler
   namespace: kube-system
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: sts-scheduler-as-system-kube-scheduler
 subjects:
-- kind: ServiceAccount
-  name: sts-scheduler
-  namespace: kube-system
+  - kind: ServiceAccount
+    name: sts-scheduler
+    namespace: kube-system
 roleRef:
-  kind: ClusterRole
   apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
   name: system:kube-scheduler
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: sts-scheduler-as-system-volume-scheduler
 subjects:
-- kind: ServiceAccount
-  name: sts-scheduler
-  namespace: kube-system
+  - kind: ServiceAccount
+    name: sts-scheduler
+    namespace: kube-system
 roleRef:
-  kind: ClusterRole
   apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
   name: system:volume-scheduler
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: sts-scheduler-extra
-subjects:
-- kind: ServiceAccount
-  name: sts-scheduler
+  name: sts-scheduler-extension-apiserver-authentication-reader
   namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: sts-scheduler
+    namespace: kube-system
 roleRef:
-  kind: ClusterRole
   apiGroup: rbac.authorization.k8s.io
-  name: sts-scheduler-extra
+  kind: Role
+  name: extension-apiserver-authentication-reader
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: sts-scheduler-extra
+  name: sts-scheduler-election
   namespace: kube-system
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get",  "list",  "watch"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["create"]
-  - apiGroups: ["coordination.k8s.io"]
-    resourceNames: ["sts-scheduler"]
-    resources: ["leases"]
-    verbs: ["get", "update"]
-  - apiGroups: [""]
-    resourceNames: ["sts-scheduler"]
-    resources: ["endpoints"]
-    verbs: ["delete",  "get",  "patch",  "update"]
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    resourceNames:
+      - sts-scheduler
+    verbs:
+      - get
+      - update
+
 ---
-apiVersion: v1
-kind: ConfigMap
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
 metadata:
-  name: sts-scheduler-config
+  name: sts-scheduler-election
   namespace: kube-system
-data:
-  config.yaml: |
-    apiVersion: kubescheduler.config.k8s.io/v1
-    kind: KubeSchedulerConfiguration
-    leaderElection:
-      leaderElect: true
-      leaseDuration: 15s
-      renewDeadline: 10s
-      resourceLock: leases
-      resourceName: sts-scheduler
-      resourceNamespace: kube-system
-    profiles:
-      - plugins:
-          preEnqueue:
-            enabled:
-              - name: StatefulSetScheduler
-          preFilter:
-            enabled:
-              - name: StatefulSetScheduler
-          filter:
-            enabled:
-              - name: StatefulSetScheduler
-        schedulerName: sts-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: sts-scheduler
+    namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sts-scheduler-election
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sts-scheduler
+  namespace: kube-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sts-scheduler
+      component: scheduler
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -103,7 +109,12 @@ metadata:
     app: sts-scheduler
     component: scheduler
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app: sts-scheduler
@@ -114,43 +125,78 @@ spec:
         app: sts-scheduler
         component: scheduler
     spec:
-      serviceAccount: sts-scheduler
+      serviceAccountName: sts-scheduler
+      priorityClassName: system-cluster-critical
+      terminationGracePeriodSeconds: 30
+      enableServiceLinks: false
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sts-scheduler
+                    component: scheduler
+                topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: sts-scheduler
           image: ghcr.io/grffio/k8s-sts-scheduler:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           args:
             - --config=/configs/config.yaml
-          env:
-            - name: STS-SCHEDULER_LABELS_POD
-              value: "example.io/kind"
-            - name: STS-SCHEDULER_LABELS_NODE
-              value: "example.io/node"
+          ports:
+            - name: https
+              containerPort: 10259
+              protocol: TCP
           resources:
             requests:
-              cpu: "100m"
-              memory: "64Mi"
+              cpu: 100m
+              memory: 128Mi
             limits:
-              cpu: "400m"
-              memory: "256Mi"
+              cpu: 400m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
           livenessProbe:
             httpGet:
-              path: /healthz
-              port: 10259
+              path: /livez
+              port: https
               scheme: HTTPS
-            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: 10259
+              path: /readyz
+              port: https
               scheme: HTTPS
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - name: sts-scheduler-config
               mountPath: /configs
+              readOnly: true
           securityContext:
-            privileged: false
-      hostNetwork: false
-      hostPID: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          terminationMessagePolicy: FallbackToLogsOnError
       volumes:
         - name: sts-scheduler-config
           configMap:

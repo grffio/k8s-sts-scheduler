@@ -1,73 +1,176 @@
-version: '3'
+version: '3.49'
 
-env:
-  CGO_ENABLED: '0'
+includes:
+  docker:
+    taskfile: ./Taskfile_Docker.yaml
+    dir: ./
+
+set: [errexit, nounset, pipefail]
 
 vars:
-  BIN_DIR: "{{.ROOT_DIR}}/bin"
-  INSTALL_DIR: "{{.GOPATH}}/bin"
-  GOPATH:
-    sh: go env GOPATH
-  VERSION:
-    sh: git log -n 1 --format=%h
+  APP_NAME: "k8s-sts-scheduler"
+  DOCKER_REGISTRY: "ghcr.io/grffio"
+
+  GOLANGCI_LINT_VERSION: v2.13.2
+  KUBECONFORM_VERSION: v0.8.0
+  KUSTOMIZE_VERSION: v5.7.1
+
+  BIN_DIR: '{{.ROOT_DIR}}/.bin'
+  TOOLS_DIR: '{{.ROOT_DIR}}/.tools'
+  TESTS_DIR: '{{.ROOT_DIR}}/.tests'
+  COVERAGE_FILE: '{{.TESTS_DIR}}/coverage.out'
+  COVERAGE_HTML: '{{.TESTS_DIR}}/coverage.html'
 
 tasks:
   default:
     cmds:
+      - task: verify
+
+  verify:
+    desc: Run the local verification suite
+    cmds:
+      - task: deps:verify
       - task: lint
       - task: test
+      - task: validate:manifests
+      - task: build
+
+  verify:ci:
+    desc: Run the CI verification suite
+    cmds:
+      - task: deps:verify
+      - task: lint
+      - task: test:race
+      - task: validate:manifests
+      - task: build
+
+  deps:verify:
+    desc: Verify go.mod and go.sum are tidy
+    cmds:
+      - go mod tidy -diff
+      - go mod verify
+
+  deps:tidy:
+    desc: Update go.mod and go.sum
+    cmds:
+      - go mod tidy
+
+  deps:download:
+    desc: Download Go module dependencies
+    cmds:
+      - go mod download
 
   lint:
-    desc: Runs golangci-lint
+    desc: Run golangci-lint
+    deps:
+      - tools:golangci-lint
     cmds:
-      - golangci-lint -v run ./...
-    sources:
-      - './**/*.go'
-      - './go.mod'
-      - .golangci.yml
+      - '"{{.TOOLS_DIR}}/golangci-lint" run ./...'
 
   test:
-    desc: Runs test suite
+    desc: Run unit tests
     cmds:
-      - go test ./...
-    sources:
-      - './**/*.go'
+      - go test -cover ./...
 
-  deps:get:
-    desc: Download the dependencies.
+  test:race:
+    desc: Run unit tests with the race detector
+    env:
+      CGO_ENABLED: '1'
     cmds:
-      -  go mod download
-    sources:
-      - 'go.mod'
-      - 'go.sum'
+      - go test -cover -race ./...
+
+  test:coverage:
+    desc: Generate test coverage
+    cmds:
+      - mkdir -p "{{.TESTS_DIR}}"
+      - go test -coverprofile="{{.COVERAGE_FILE}}" ./...
+
+  test:coverage:html:
+    desc: Generate HTML coverage report
+    deps:
+      - test:coverage
+    cmds:
+      - go tool cover -html="{{.COVERAGE_FILE}}" -o "{{.COVERAGE_HTML}}"
+      - go tool cover -html={{.COVERAGE_FILE}}
+
+  validate:manifests:
+    desc: Validate Kubernetes manifests
+    deps:
+      - tools:kubeconform
+      - tools:kustomize
+    vars:
+      KUBERNETES_SCHEMA_VERSION: 1.32.0
+    cmds:
+      - |
+        "{{.TOOLS_DIR}}/kustomize" build examples |
+          "{{.TOOLS_DIR}}/kubeconform" \
+            -kubernetes-version "{{.KUBERNETES_SCHEMA_VERSION}}" \
+            -strict \
+            -summary
+      - |
+        "{{.TOOLS_DIR}}/kubeconform" \
+          -kubernetes-version "{{.KUBERNETES_SCHEMA_VERSION}}" \
+          -strict \
+          -summary \
+          examples/sts-application.yaml
 
   build:
-    desc: Build Task
-    deps: [deps:get]
-    cmds:
-      - mkdir -p {{.BIN_DIR}}
-      - go build -ldflags="-w -s" -o {{.BIN_DIR}} ./...
+    desc: Build all commands from ./cmd
     env:
-      VERSION: "{{.VERSION}}"
-    sources:
-      - './**/*.go'
-    generates:
-      - "{{.BIN_DIR}}/scheduler"
-
-  install:
-    desc: Installs Task
-    deps: [deps:get]
+      CGO_ENABLED: '0'
+    preconditions:
+      - sh: test -d ./cmd
+        msg: "./cmd directory not found"
     cmds:
-      - go install -ldflags="-w -s" ./...
-    env:
-      VERSION: "{{.VERSION}}"
-    sources:
-      - './**/*.go'
-    generates:
-      - "{{.INSTALL_DIR}}/scheduler"
+      - mkdir -p "{{.BIN_DIR}}"
+      - go build -trimpath -o "{{.BIN_DIR}}/" ./cmd/...
 
   clean:
-    desc: Cleans
+    desc: Remove generated artifacts
     cmds:
-      - rm -rf {{.BIN_DIR}}
-      - rm -rf {{.INSTALL_DIR}}/scheduler
+      - rm -rf "{{.BIN_DIR}}" "{{.TESTS_DIR}}"
+
+  tools:
+    desc: Install development tools
+    cmds:
+      - task: tools:golangci-lint
+      - task: tools:kubeconform
+      - task: tools:kustomize
+
+  tools:golangci-lint:
+    internal: true
+    status:
+      - >-
+        test -x "{{.TOOLS_DIR}}/golangci-lint" &&
+        go version -m "{{.TOOLS_DIR}}/golangci-lint" |
+        grep -Eq 'mod[[:space:]]+github.com/golangci/golangci-lint/v2[[:space:]]+{{.GOLANGCI_LINT_VERSION}}([[:space:]]|$)'
+    cmds:
+      - mkdir -p "{{.TOOLS_DIR}}"
+      - GOBIN="{{.TOOLS_DIR}}" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+
+  tools:kubeconform:
+    internal: true
+    status:
+      - >-
+        test -x "{{.TOOLS_DIR}}/kubeconform" &&
+        go version -m "{{.TOOLS_DIR}}/kubeconform" |
+        grep -Eq 'mod[[:space:]]+github.com/yannh/kubeconform[[:space:]]+{{.KUBECONFORM_VERSION}}([[:space:]]|$)'
+    cmds:
+      - mkdir -p "{{.TOOLS_DIR}}"
+      - GOBIN="{{.TOOLS_DIR}}" go install github.com/yannh/kubeconform/cmd/kubeconform@{{.KUBECONFORM_VERSION}}
+
+  tools:kustomize:
+    internal: true
+    status:
+      - >-
+        test -x "{{.TOOLS_DIR}}/kustomize" &&
+        go version -m "{{.TOOLS_DIR}}/kustomize" |
+        grep -Eq 'mod[[:space:]]+sigs.k8s.io/kustomize/kustomize/v5[[:space:]]+{{.KUSTOMIZE_VERSION}}([[:space:]]|$)'
+    cmds:
+      - mkdir -p "{{.TOOLS_DIR}}"
+      - GOBIN="{{.TOOLS_DIR}}" go install sigs.k8s.io/kustomize/kustomize/v5@{{.KUSTOMIZE_VERSION}}
+
+  tools:clean:
+    desc: Remove installed development tools
+    cmds:
+      - rm -rf "{{.TOOLS_DIR}}"
