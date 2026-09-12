@@ -111,6 +111,7 @@ jobs:
             latest=false
           tags: |
             type=sha,format=long
+            type=raw,value=latest
 
       - name: Build and publish container
         uses: docker/build-push-action@v7
