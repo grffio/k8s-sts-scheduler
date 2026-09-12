@@ -2,155 +2,326 @@ package statefulset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
-
-	v1 "k8s.io/api/core/v1"
+	fwk "k8s.io/kube-scheduler/framework"
+	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
+	schedutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
-// Name is the name of the plugin used in the plugin registry and configurations.
-const Name = "StatefulSetScheduler"
+const (
+	// Name is the scheduler framework registration name for the plugin.
+	Name = "StatefulSetOrdinal"
 
-// Labels holds the labels configuration for the Scheduler.
-type Labels struct {
-	Pod  []string `envconfig:"pod" required:"true" desc:"Labels for Pod to be considered by the StatefulSetScheduler (any of the list)"`
-	Node string   `envconfig:"node" required:"true" desc:"Label to match for a Node to be considered suitable for scheduling a Pod"`
+	ordinalStateKey fwk.StateKey = Name + "/ordinal"
+
+	podOrdinalSignKey = "k8s-sts-scheduler.grffio.github.com/pod-ordinal"
+)
+
+type plugin struct {
+	nodeOrdinalLabelKey string
 }
 
-// Scheduler is a plugin that implements sorting based on the pod index and node's label match.
-type Scheduler struct {
-	Labels Labels
+type preFilterState struct {
+	ordinal int32
 }
 
-// NewScheduler initializes and returns a new Scheduler plugin.
-func NewScheduler(labels Labels) (framework.Plugin, error) {
-	return &Scheduler{
-		Labels: labels,
+// Clone returns the immutable pre-filter state.
+func (s *preFilterState) Clone() fwk.StateData {
+	return s
+}
+
+var (
+	_ fwk.PreFilterPlugin   = (*plugin)(nil)
+	_ fwk.FilterPlugin      = (*plugin)(nil)
+	_ fwk.EnqueueExtensions = (*plugin)(nil)
+	_ fwk.SignPlugin        = (*plugin)(nil)
+)
+
+// New creates a StatefulSetOrdinal scheduler plugin.
+func New(_ context.Context, config runtime.Object, _ fwk.Handle) (fwk.Plugin, error) {
+	var args Args
+
+	if err := frameworkruntime.DecodeInto(config, &args); err != nil {
+		return nil, fmt.Errorf("%s: decode configuration: %w", Name, err)
+	}
+
+	if err := args.validate(); err != nil {
+		return nil, fmt.Errorf("%s: invalid configuration: %w", Name, err)
+	}
+
+	return &plugin{
+		nodeOrdinalLabelKey: args.NodeOrdinalLabel,
 	}, nil
 }
 
-// Ensure Scheduler implements the necessary interfaces.
-var (
-	_ framework.PreEnqueuePlugin = &Scheduler{}
-	_ framework.PreFilterPlugin  = &Scheduler{}
-	_ framework.FilterPlugin     = &Scheduler{}
-)
-
-// Name returns name of the plugin.
-func (s *Scheduler) Name() string {
+// Name returns the scheduler framework registration name.
+func (*plugin) Name() string {
 	return Name
 }
 
-// PreEnqueue checks if the pod should be considered for scheduling.
-func (s *Scheduler) PreEnqueue(_ context.Context, pod *v1.Pod) *framework.Status {
-	// Check if the Pod is owned by a StatefulSet.
-	if !isOwnedByStatefulSet(pod) {
-		msg := fmt.Sprintf("Pod %s is not owned by a StatefulSet", pod.Name)
-		klog.V(1).InfoS(msg, "pod", pod.Name)
-		return framework.NewStatus(framework.UnschedulableAndUnresolvable, msg)
+// SignPod contributes the StatefulSet Pod ordinal to the scheduling signature.
+//
+// A signing failure only makes the Pod ineligible for batching optimization.
+// PreFilter remains responsible for rejecting Pods with invalid ordinals.
+func (*plugin) SignPod(_ context.Context, pod *corev1.Pod) ([]fwk.SignFragment, *fwk.Status) {
+	if !isStatefulSetPod(pod) {
+		return nil, nil
 	}
 
-	return nil
-}
-
-// isOwnedByStatefulSet checks if the given pod is owned by a StatefulSet.
-func isOwnedByStatefulSet(pod *v1.Pod) bool {
-	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "StatefulSet" {
-			return true
-		}
-	}
-	return false
-}
-
-// PreFilterExtensions returns nil as Scheduler does not have any prefilter extensions.
-func (s *Scheduler) PreFilterExtensions() framework.PreFilterExtensions {
-	return nil
-}
-
-// PreFilter checks if a pod can be scheduled based on its labels.
-func (s *Scheduler) PreFilter(_ context.Context, _ *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
-	// Check if the Pod has any of the required labels.
-	if !hasAnyLabel(pod, s.Labels.Pod) {
-		msg := fmt.Sprintf("Pod %s does not have any of the required labels: %v", pod.Name, s.Labels.Pod)
-		klog.V(1).InfoS(msg, "pod", pod.Name)
-		return nil, framework.NewStatus(framework.Unschedulable, msg)
+	ordinal, err := podOrdinal(pod)
+	if err != nil {
+		return nil, fwk.NewStatus(fwk.Unschedulable, err.Error())
 	}
 
-	klog.V(1).InfoS("Pod passed prefilter successfully", "pod", pod.Name)
+	return []fwk.SignFragment{
+		{
+			Key:   podOrdinalSignKey,
+			Value: ordinal,
+		},
+	}, nil
+}
+
+// PreFilter extracts the StatefulSet pod ordinal for use by Filter.
+func (*plugin) PreFilter(_ context.Context, state fwk.CycleState, pod *corev1.Pod, _ []fwk.NodeInfo) (*fwk.PreFilterResult, *fwk.Status) {
+	if !isStatefulSetPod(pod) {
+		return nil, fwk.NewStatus(fwk.Skip)
+	}
+
+	ordinal, err := podOrdinal(pod)
+	if err != nil {
+		return nil, fwk.NewStatus(fwk.UnschedulableAndUnresolvable, err.Error())
+	}
+
+	if state == nil {
+		return nil, fwk.AsStatus(errors.New("cycle state is nil"))
+	}
+	state.Write(ordinalStateKey, &preFilterState{ordinal: ordinal})
+
 	return nil, nil
 }
 
-// hasAnyLabel checks if the pod has any of the specified labels.
-func hasAnyLabel(pod *v1.Pod, labelKeys []string) bool {
-	for _, key := range labelKeys {
-		if _, exists := pod.Labels[key]; exists {
-			return true
-		}
-	}
-	return false
-}
-
-// Filter checks if a node is suitable for scheduling the pod based on node labels and pod ordinal.
-func (s *Scheduler) Filter(_ context.Context, _ *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
-	node := nodeInfo.Node()
-
-	// Get the node label value as an integer.
-	nodeLabelValue, err := getNodeLabelValue(node, s.Labels.Node)
-	if err != nil {
-		klog.V(1).InfoS("Filter failed", "node", node.Name, "error", err)
-		return framework.NewStatus(framework.Unschedulable, err.Error())
-	}
-
-	// Get the pod ordinal number.
-	podOrdinal, err := getPodOrdinal(pod)
-	if err != nil {
-		klog.V(1).InfoS("Filter failed", "pod", pod.Name, "error", err)
-		return framework.NewStatus(framework.Unschedulable, err.Error())
-	}
-
-	// Check if the node label value matches the pod ordinal.
-	if nodeLabelValue != podOrdinal {
-		msg := fmt.Sprintf("Node %s is not suitable for pod %s placement", node.Name, pod.Name)
-		klog.V(1).InfoS(msg, "node", node.Name, "pod", pod.Name)
-		return framework.NewStatus(framework.Unschedulable, msg)
-	}
-
-	klog.V(1).InfoS("Node passed filter successfully", "node", node.Name, "pod", pod.Name)
+// PreFilterExtensions returns nil because the plugin has no incremental state.
+func (*plugin) PreFilterExtensions() fwk.PreFilterExtensions {
 	return nil
 }
 
-// getNodeLabelValue retrieves and parses the node's label value as an integer.
-func getNodeLabelValue(node *v1.Node, labelKey string) (int, error) {
-	valueStr, exists := node.Labels[labelKey]
-	if !exists {
-		return 0, fmt.Errorf("node %s does not have label %q", node.Name, labelKey)
+// Filter permits nodes whose configured ordinal matches the StatefulSet pod
+// ordinal.
+func (p *plugin) Filter(ctx context.Context, state fwk.CycleState, pod *corev1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
+	if err := context.Cause(ctx); err != nil {
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, err.Error())
 	}
 
-	valueInt, err := strconv.Atoi(valueStr)
+	ordinal, err := readOrdinal(state)
 	if err != nil {
-		return 0, fmt.Errorf("node %s has invalid label %q value: %q, expected integer", node.Name, labelKey, valueStr)
+		if !errors.Is(err, fwk.ErrNotFound) {
+			return fwk.AsStatus(fmt.Errorf("%s: %w", Name, err))
+		}
+
+		// Filter can be configured without PreFilter, so derive the ordinal
+		// directly from the Pod when CycleState does not contain it.
+		if !isStatefulSetPod(pod) {
+			return nil
+		}
+
+		ordinal, err = podOrdinal(pod)
+		if err != nil {
+			return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, err.Error())
+		}
 	}
 
-	return valueInt, nil
+	if nodeInfo == nil || nodeInfo.Node() == nil {
+		return fwk.AsStatus(
+			errors.New("filter received NodeInfo without a Node"),
+		)
+	}
+
+	node := nodeInfo.Node()
+
+	nodeOrdinal, err := p.nodeOrdinal(node)
+	if err != nil {
+		return fwk.NewStatus(fwk.UnschedulableAndUnresolvable, err.Error())
+	}
+
+	if nodeOrdinal != ordinal {
+		return fwk.NewStatus(
+			fwk.UnschedulableAndUnresolvable,
+			fmt.Sprintf("node %q has ordinal %d, pod requires ordinal %d", node.Name, nodeOrdinal, ordinal),
+		)
+	}
+
+	return nil
 }
 
-// getPodOrdinal extracts the ordinal number from the pod's name.
-func getPodOrdinal(pod *v1.Pod) (int, error) {
-	parts := strings.Split(pod.Name, "-")
-	if len(parts) == 0 {
-		return 0, fmt.Errorf("pod %s name format is invalid", pod.Name)
-	}
+// EventsToRegister returns cluster events that can make a rejected pod
+// schedulable.
+func (p *plugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
+	return []fwk.ClusterEventWithHint{
+		{
+			Event: fwk.ClusterEvent{
+				Resource:   fwk.Node,
+				ActionType: fwk.Add | fwk.UpdateNodeLabel,
+			},
+			QueueingHintFn: p.isSchedulableAfterNodeChange,
+		},
+		{
+			Event: fwk.ClusterEvent{
+				Resource:   fwk.TargetPod,
+				ActionType: fwk.Update,
+			},
+			QueueingHintFn: p.isSchedulableAfterPodChange,
+		},
+	}, nil
+}
 
-	ordinalStr := parts[len(parts)-1]
-	ordinal, err := strconv.Atoi(ordinalStr)
+func podOrdinal(pod *corev1.Pod) (int32, error) {
+	ordinal, err := ordinalFromLabel(pod.Labels, appsv1.PodIndexLabel)
 	if err != nil {
-		return 0, fmt.Errorf("pod %s has invalid ordinal number", pod.Name)
+		return 0, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 
 	return ordinal, nil
+}
+
+func (p *plugin) nodeOrdinal(node *corev1.Node) (int32, error) {
+	ordinal, err := ordinalFromLabel(node.Labels, p.nodeOrdinalLabelKey)
+	if err != nil {
+		return 0, fmt.Errorf("node %q: %w", node.Name, err)
+	}
+
+	return ordinal, nil
+}
+
+func ordinalFromLabel(labels map[string]string, key string) (int32, error) {
+	value, ok := labels[key]
+	if !ok {
+		return 0, fmt.Errorf("missing required ordinal label %q", key)
+	}
+
+	ordinal, err := parseOrdinal(value)
+	if err != nil {
+		return 0, fmt.Errorf("label %q has invalid ordinal %q: %w", key, value, err)
+	}
+
+	return ordinal, nil
+}
+
+func parseOrdinal(value string) (int32, error) {
+	ordinal, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || ordinal < 0 {
+		return 0, errors.New("ordinal must be a non-negative 32-bit decimal integer")
+	}
+
+	return int32(ordinal), nil
+}
+
+func isStatefulSetPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+
+	owner := metav1.GetControllerOf(pod)
+	return owner != nil &&
+		owner.APIVersion == appsv1.SchemeGroupVersion.String() &&
+		owner.Kind == "StatefulSet"
+}
+
+func readOrdinal(state fwk.CycleState) (int32, error) {
+	rawState, err := state.Read(ordinalStateKey)
+	if err != nil {
+		return 0, fmt.Errorf("read ordinal from cycle state: %w", err)
+	}
+
+	preFilterState, ok := rawState.(*preFilterState)
+	if !ok || preFilterState == nil {
+		return 0, fmt.Errorf("invalid ordinal cycle state type %T", rawState)
+	}
+
+	return preFilterState.ordinal, nil
+}
+
+func (p *plugin) isSchedulableAfterNodeChange(_ klog.Logger, pod *corev1.Pod, oldObj, newObj any) (fwk.QueueingHint, error) {
+	oldNode, newNode, err := schedutil.As[*corev1.Node](oldObj, newObj)
+	if err != nil {
+		return fwk.Queue, err
+	}
+	if newNode == nil {
+		return fwk.Queue, errors.New("node event has nil new object")
+	}
+
+	if !isStatefulSetPod(pod) {
+		return fwk.QueueSkip, nil
+	}
+
+	ordinal, err := podOrdinal(pod)
+	if err != nil {
+		//nolint:nilerr // A node change cannot fix an invalid Pod ordinal.
+		return fwk.QueueSkip, nil
+	}
+
+	if !p.nodeMatchesOrdinal(newNode, ordinal) {
+		return fwk.QueueSkip, nil
+	}
+
+	if oldNode == nil {
+		return fwk.Queue, nil
+	}
+
+	if p.nodeMatchesOrdinal(oldNode, ordinal) {
+		return fwk.QueueSkip, nil
+	}
+
+	return fwk.Queue, nil
+}
+
+func (*plugin) isSchedulableAfterPodChange(_ klog.Logger, _ *corev1.Pod, oldObj, newObj any) (fwk.QueueingHint, error) {
+	oldPod, newPod, err := schedutil.As[*corev1.Pod](oldObj, newObj)
+	if err != nil {
+		return fwk.Queue, err
+	}
+	if oldPod == nil || newPod == nil {
+		return fwk.Queue, errors.New("target Pod update requires old and new objects")
+	}
+
+	oldIsStatefulSet := isStatefulSetPod(oldPod)
+	newIsStatefulSet := isStatefulSetPod(newPod)
+
+	if oldIsStatefulSet && !newIsStatefulSet {
+		return fwk.Queue, nil
+	}
+
+	if !newIsStatefulSet {
+		return fwk.QueueSkip, nil
+	}
+
+	newOrdinal, err := podOrdinal(newPod)
+	if err != nil {
+		//nolint:nilerr // An invalid ordinal intentionally maps to QueueSkip.
+		return fwk.QueueSkip, nil
+	}
+
+	if !oldIsStatefulSet {
+		return fwk.Queue, nil
+	}
+
+	oldOrdinal, err := podOrdinal(oldPod)
+	if err != nil || oldOrdinal != newOrdinal {
+		//nolint:nilerr // Invalid-to-valid and ordinal changes require requeueing.
+		return fwk.Queue, nil
+	}
+
+	return fwk.QueueSkip, nil
+}
+
+func (p *plugin) nodeMatchesOrdinal(node *corev1.Node, ordinal int32) bool {
+	nodeOrdinal, err := p.nodeOrdinal(node)
+	return err == nil && nodeOrdinal == ordinal
 }
