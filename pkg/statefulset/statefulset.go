@@ -174,7 +174,7 @@ func (p *plugin) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint
 		},
 		{
 			Event: fwk.ClusterEvent{
-				Resource:   fwk.TargetPod,
+				Resource:   fwk.Pod,
 				ActionType: fwk.Update,
 			},
 			QueueingHintFn: p.isSchedulableAfterPodChange,

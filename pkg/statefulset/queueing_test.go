@@ -33,7 +33,7 @@ func TestEventsToRegister(t *testing.T) {
 		ActionType: fwk.Add | fwk.UpdateNodeLabel,
 	}])
 	assert.True(t, registered[fwk.ClusterEvent{
-		Resource:   fwk.TargetPod,
+		Resource:   fwk.Pod,
 		ActionType: fwk.Update,
 	}])
 }
@@ -185,7 +185,7 @@ func TestTargetPodQueueingHint(t *testing.T) {
 	hintFn := queueingHintForEvent(
 		t,
 		contracts.enqueue,
-		fwk.ClusterEvent{Resource: fwk.TargetPod, ActionType: fwk.Update},
+		fwk.ClusterEvent{Resource: fwk.Pod, ActionType: fwk.Update},
 	)
 	logger := klog.Background()
 	queuedPod := statefulSetPod("default", "queued-db-2", "2")

@@ -99,7 +99,7 @@ tasks:
       - tools:kubeconform
       - tools:kustomize
     vars:
-      KUBERNETES_SCHEMA_VERSION: 1.32.0
+      KUBERNETES_SCHEMA_VERSION: 1.36.4
     cmds:
       - |
         "{{.TOOLS_DIR}}/kustomize" build examples |
