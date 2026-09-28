@@ -53,7 +53,7 @@ controller or descheduler policy.
 
 ## Compatibility
 
-This scheduler is built against Kubernetes v1.36.x scheduler framework APIs.
+This scheduler is built against Kubernetes v1.35.x scheduler framework APIs.
 Kubernetes v1.32 or later is required at runtime because the scheduling
 contract relies on the StatefulSet `apps.kubernetes.io/pod-index` label.
 
